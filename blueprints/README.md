@@ -15,8 +15,10 @@ on it:
 ## Set up
 
 1. Set up the uploader. It reads a Home Assistant token from 1Password:
-   1. Install the 1Password CLI with `brew install --cask 1password-cli`
-      (listed in [brewfile.rb](../brewfile.rb)). In the 1Password app, turn on
+   1. Install the 1Password CLI with `brew install --cask 1password-cli` (it's
+      in dotfiles'
+      [brewfile.rb](https://github.com/maxburs/dotfiles/blob/master/brewfile.rb)).
+      In the 1Password app, turn on
       **Settings → Developer → Integrate with 1Password CLI**.
    2. Create a long-lived access token: open your Home Assistant profile's
       [**Security** tab](https://my.home-assistant.io/redirect/profile_security),
@@ -25,11 +27,13 @@ on it:
    3. In 1Password, save it as an **API Credential** item named
       `Home Assistant (ha-yellow)`, with the token in the **credential** field.
 
-   Then, from the repo root, run `nu ha-blueprints/upload.nu`. The uploader
+   Then, from the repo root, run `nu blueprints/upload.nu`. The uploader
    copies the blueprint files to `/config/blueprints/` over SSH, using the
-   `ha-yellow` alias from [ssh-config](../ssh-config), then reloads all YAML
-   configuration. It doesn't delete other blueprints. If the configuration is
-   invalid, Home Assistant reports the error and reloads nothing.
+   `ha-yellow` alias from dotfiles'
+   [ssh-config](https://github.com/maxburs/dotfiles/blob/master/ssh-config),
+   then reloads all YAML configuration. It doesn't delete other blueprints. If
+   the configuration is invalid, Home Assistant reports the error and reloads
+   nothing.
 
    1Password asks you to approve the first upload in each terminal window,
    with Touch ID or your password. It asks again after 10 minutes without a
@@ -98,13 +102,13 @@ display name). Anything else stops with an error and turns nothing on:
 From the repo root:
 
 ```sh
-nix develop ./ha-blueprints --command uv run --script ha-blueprints/test_lighting.py
+nix develop --command uv run --script blueprints/test_lighting.py
 ```
 
-The [flake](./flake.nix) provides `uv` and Python 3.14, pinned in
+The repo's [flake](../flake.nix) provides `uv` and Python 3.14, pinned in
 `flake.lock`, and stops `uv` from downloading another Python. Nix reads the
 flake from Git, so commit or `git add` changes to `flake.nix` and `flake.lock`
-first. To update the pins, run `nix flake update --flake ./ha-blueprints`.
+first. To update the pins, run `nix flake update`.
 
 The test script declares its Home Assistant version inline. Tests load the
 blueprints in a temporary HA configuration, advance a simulated clock, change

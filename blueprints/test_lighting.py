@@ -2,7 +2,7 @@
 # requires-python = ">=3.14.2,<3.15"
 # dependencies = ["homeassistant==2026.11.3"]
 # ///
-"""Run from the repo root: `nix develop ./ha-blueprints --command uv run --script ha-blueprints/test_lighting.py`."""
+"""Run from the repo root: `nix develop --command uv run --script blueprints/test_lighting.py`."""
 
 from datetime import timedelta
 from pathlib import Path
