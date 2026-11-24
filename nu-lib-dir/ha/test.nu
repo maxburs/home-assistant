@@ -1,6 +1,6 @@
 # test.nu — tests for the ha module, through its commands, with small made-up
 # logs.
-# Run with:  nu ~/workspace/home-assistant/cli/ha/test.nu
+# Run with:  nu ~/workspace/home-assistant/nu-lib-dir/ha/test.nu
 
 # The expected times are Los Angeles times across its 2026 DST change, so run
 # in that time zone whatever this machine's is.
