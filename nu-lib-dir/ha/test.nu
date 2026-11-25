@@ -78,20 +78,26 @@ try {
   ] "ha border-router errors --daily: a column per kind, days without errors"
   check (ha border-router errors $border_router_log --since '2026-11-01 12:00' | get time) ['2026-11-03 Tue 11:00:00'] "ha border-router errors --since"
 
-  # Node 0xa is removed while unavailable, 0x12 (18) recovers twice (once
-  # without a subscription timeout first), and 7 never comes back.
+  # Node 0xa (10) is removed while offline. 0x12 (18) comes back twice; before
+  # its second outage, its subscription times out but comes back, so when it
+  # was last heard is unknown. 7 never comes back, and its subscription times
+  # out after it went offline, which still says when it was last heard. The
+  # server's own node going offline isn't an outage.
   let matter_log = $workdir | path join matter.txt
   [
     '2026-10-01 10:00:00.000 INFO   ClientSubscription   Subscription aa to peer @1:a timed out after 1m 41s'
-    '2026-10-01 10:03:00.000 WARN   Controller~ndHandler Node @1:a offline grace period expired, marking unavailable'
+    '2026-10-01 10:03:00.000 INFO   ClientNode           server-2-134b.@1:a is offline'
     '2026-10-01 11:00:00.000 INFO   Peer                 Removing @1:a'
     '2026-10-01 12:00:00.000 INFO   ClientSubscription   Subscription bb to peer @1:12 timed out after 15m 38s'
-    '2026-10-01 12:03:00.000 WARN   Controller~ndHandler Node @1:12 offline grace period expired, marking unavailable'
-    '2026-10-01 12:30:00.000 INFO   WebSocketC~erHandler [2] Node @1:12 availability changed to true'
-    '2026-10-01 12:30:00.000 NOTICE Controller~ndHandler Node @1:12 availability changed to true (state: Connected)'
-    '2026-10-03 08:00:00.000 WARN   Controller~ndHandler Node @1:12 offline grace period expired, marking unavailable'
-    '2026-10-03 09:00:00.000 NOTICE Controller~ndHandler Node @1:12 availability changed to true (state: Connected)'
-    '2026-10-04 06:00:00.000 WARN   Controller~ndHandler Node @1:7 offline grace period expired, marking unavailable'
+    '2026-10-01 12:03:00.000 INFO   ClientNode           server-2-134b.@1:12 is offline'
+    '2026-10-01 12:30:00.000 INFO   ClientNode           server-2-134b.@1:12 is online'
+    '2026-10-03 07:00:00.000 INFO   ClientSubscription   Subscription cc to peer @1:12 timed out after 15m 38s'
+    '2026-10-03 07:00:01.000 INFO   ClientInteraction    Subscription successful « @1:12•3aed⇵4ca1 3↔3+1 id: dd interval: 15m timeout: 15m 38s'
+    '2026-10-03 08:00:00.000 INFO   ClientNode           server-2-134b.@1:12 is offline'
+    '2026-10-03 09:00:00.000 INFO   ClientNode           server-2-134b.@1:12 is online'
+    '2026-10-04 06:00:00.000 INFO   ClientNode           server-2-134b.@1:7 is offline'
+    '2026-10-04 06:00:00.100 NOTICE Node                 server-2-134b is offline'
+    '2026-10-04 06:05:00.000 INFO   ClientSubscription   Subscription ee to peer @1:7 timed out after 15m 38s'
     '2026-10-05 12:00:00.000 INFO   ClientInteraction    Invoke » @1:6•9c02⇵b86f 1.onOff.on with (no payload)'
   ] | str join "\n" | save $matter_log
   # `ha download` saves names next to the log; only node 18's is known here.
@@ -99,11 +105,11 @@ try {
 
   let switch = 'Bedroom lightswitch'
   check (ha matter disconnects $matter_log) [
-    {node: 10, name: null, last_heard: '2026-10-01 Thu 09:58:19', unavailable: '2026-10-01 Thu 10:03:00', available: removed, down: 57min}
-    {node: 18, name: $switch, last_heard: '2026-10-01 Thu 11:44:22', unavailable: '2026-10-01 Thu 12:03:00', available: '2026-10-01 Thu 12:30:00', down: 27min}
-    {node: 18, name: $switch, last_heard: null, unavailable: '2026-10-03 Sat 08:00:00', available: '2026-10-03 Sat 09:00:00', down: 1hr}
-    {node: 7, name: null, last_heard: null, unavailable: '2026-10-04 Sun 06:00:00', available: 'still unavailable', down: 30hr}
-  ] "ha matter disconnects: names, last heard, removed, still unavailable"
+    {node: 10, name: null, last_heard: '2026-10-01 Thu 09:58:19', offline: '2026-10-01 Thu 10:03:00', online: removed, down: 57min}
+    {node: 18, name: $switch, last_heard: '2026-10-01 Thu 11:44:22', offline: '2026-10-01 Thu 12:03:00', online: '2026-10-01 Thu 12:30:00', down: 27min}
+    {node: 18, name: $switch, last_heard: null, offline: '2026-10-03 Sat 08:00:00', online: '2026-10-03 Sat 09:00:00', down: 1hr}
+    {node: 7, name: null, last_heard: '2026-10-04 Sun 05:49:22', offline: '2026-10-04 Sun 06:00:00', online: 'still offline', down: 30hr}
+  ] "ha matter disconnects: names, last heard, removed, still offline"
   check (ha matter disconnects $matter_log --daily) [
     {date: '2026-10-01 Thu', 'node 7': 0, 'node 10': 1, 'node 18': 1, total: 2}
     {date: '2026-10-02 Fri', 'node 7': 0, 'node 10': 0, 'node 18': 0, total: 0}
@@ -112,7 +118,7 @@ try {
     {date: '2026-10-05 Mon', 'node 7': 0, 'node 10': 0, 'node 18': 0, total: 0}
   ] "ha matter disconnects --daily: a column per node, days without outages"
 
-  let unavailable_7 = 'unavailable since 2026-10-04 Sun 06:00:00'
+  let offline_7 = 'offline since 2026-10-04 Sun 06:00:00'
   let removed_10 = 'removed 2026-10-01 Thu 11:00:00'
   check (ha matter downtime $matter_log) [
     {from: '2026-10-01 Thu', to: '2026-10-03 Sat', down: 144min, nodes: [
@@ -120,7 +126,7 @@ try {
       {node: 18, name: $switch, outages: 2, down: 87min, note: null}
     ]}
     {from: '2026-10-04 Sun', to: '2026-10-05 Mon', down: 30hr, nodes: [
-      {node: 7, name: null, outages: 1, down: 30hr, note: $unavailable_7}
+      {node: 7, name: null, outages: 1, down: 30hr, note: $offline_7}
     ]}
   ] "ha matter downtime: weeks from Sunday, cut to the log, with total downtime"
 
@@ -129,8 +135,8 @@ try {
   # not the outage.
   let dst_log = $workdir | path join dst.txt
   [
-    '2026-10-31 12:00:00.000 WARN   Controller~ndHandler Node @1:1 offline grace period expired, marking unavailable'
-    '2026-11-02 12:00:00.000 NOTICE Controller~ndHandler Node @1:1 availability changed to true (state: Connected)'
+    '2026-10-31 12:00:00.000 INFO   ClientNode           server-2-134b.@1:1 is offline'
+    '2026-11-02 12:00:00.000 INFO   ClientNode           server-2-134b.@1:1 is online'
   ] | str join "\n" | save $dst_log
   check (ha matter downtime $dst_log --bin 1day | each {|p| {from: $p.from, outages: $p.nodes.0.outages, down: $p.nodes.0.down} }) [
     {from: '2026-10-31 Sat', outages: 1, down: 12hr}

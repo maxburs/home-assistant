@@ -1,14 +1,18 @@
 # The Matter Server add-on's log: when devices dropped off.
 #
-# Home Assistant marks a device unavailable once the server's subscription to
-# it has been lost for 3 minutes (`Node @1:12 offline grace period expired,
-# marking unavailable`), and available again when it reconnects (`Node @1:12
-# availability changed to true`). Each span in between is an outage.
+# The server logs a device offline when it loses the connection
+# (`ClientNode server-2-134b.@1:12 is offline`), and online when it reconnects
+# (`… @1:12 is online`). Each span in between is an outage: a remote's presses
+# are lost then, though Home Assistant can still show it as available.
+# Restarting the server also logs every device offline, until it reconnects to
+# them a minute or two later.
 #
-# The subscription is lost when a device's report is overdue (`Subscription …
-# to peer @1:12 timed out after 15m 38s`), so the device went quiet before it
-# was marked unavailable: `last_heard` is when its last report arrived. Sleepy
-# Thread devices report every 15 minutes, so that's up to 19 minutes earlier.
+# A device usually goes offline shortly after its subscription times out
+# because a report is overdue (`Subscription … to peer @1:12 timed out after
+# 15m 38s`), so it went quiet earlier: `last_heard` is when its last report
+# arrived, or empty if no subscription was lost, as in a restart. Sleepy
+# Thread devices report at least every 15 minutes, so `last_heard` is usually
+# 16 to 20 minutes before `offline`.
 #
 # Node IDs are decimal, as Home Assistant shows them; the log writes them in hex
 # after the fabric index (`@1:12` is node 18). Their names in Home Assistant
@@ -25,14 +29,15 @@ const TIME_PATTERN = '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}'
 const EVENT_PATTERN = (
   '^(?<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) +\S+ +\S+ +(?:'
   + 'Subscription \S+ to peer @\d+:(?<timed_out>[0-9a-f]+) timed out after (?<after>.+)'
-  + '|Node @\d+:(?<unavailable>[0-9a-f]+) offline grace period expired, marking unavailable'
-  + '|Node @\d+:(?<available>[0-9a-f]+) availability changed to true\b.*'
+  + '|Subscription successful « @\d+:(?<subscribed>[0-9a-f]+)\b.*'
+  + '|\S+\.@\d+:(?<offline>[0-9a-f]+) is offline'
+  + '|\S+\.@\d+:(?<online>[0-9a-f]+) is online'
   + '|Removing @\d+:(?<removed>[0-9a-f]+)'
   + ')$'
 )
 
-# List outages: when each device was last heard from, marked unavailable, and
-# available again, and how long it was down. Reads the downloaded log, or the
+# List outages: when each device was last heard from, went offline, and came
+# back online, and how long it was offline. Reads the downloaded log, or the
 # one at `path`.
 export def disconnects [
   path: path = $MATTER_LOG
@@ -41,9 +46,9 @@ export def disconnects [
 ]: nothing -> table {
   let since = if $since != null { $since | into datetime }
   let log = read-log $path
-  let outages = $log.outages | where {|o| $since == null or $o.unavailable >= $since }
+  let outages = $log.outages | where {|o| $since == null or $o.offline >= $since }
   if $daily {
-    let rows = $outages | each {|o| {time: $o.unavailable, column: $"node ($o.node)"} }
+    let rows = $outages | each {|o| {time: $o.offline, column: $"node ($o.node)"} }
     let nodes = $outages | each { $in.node } | uniq | sort | each {|node| $"node ($node)" }
     count-by-day $rows $nodes ($since | default $log.start) $log.end
   } else {
@@ -51,9 +56,9 @@ export def disconnects [
       node: $o.node
       name: (node-name $log $o.node)
       last_heard: (if $o.last_heard != null { $o.last_heard | format date $TIME_FORMAT })
-      unavailable: ($o.unavailable | format date $TIME_FORMAT)
-      available: (if $o.available != null { $o.available | format date $TIME_FORMAT } else { $o.unended })
-      down: ($o.until - $o.unavailable | round-minutes)
+      offline: ($o.offline | format date $TIME_FORMAT)
+      online: (if $o.online != null { $o.online | format date $TIME_FORMAT } else { $o.unended })
+      down: ($o.until - $o.offline | round-minutes)
     } }
   }
 }
@@ -62,8 +67,8 @@ export def disconnects [
 # from Sunday to Saturday unless given another number of days, with the total
 # downtime and a table of the nodes that were down then. A node's `outages`
 # are the ones that began in the period, and its `down` is all its time
-# unavailable then, including from outages that began earlier. `note` says if
-# it's still unavailable or was removed. The first and last periods only cover
+# offline then, including from outages that began earlier. `note` says if it's
+# still offline or was removed. The first and last periods only cover
 # what the log does. Reads the downloaded log, or the one at `path`.
 export def downtime [
   path: path = $MATTER_LOG
@@ -134,39 +139,48 @@ def read-log [path: path]: nothing -> record {
   }
 }
 
-# Pairs each "marking unavailable" with the node's next "availability changed
-# to true", in order of when they began. Outages without an end were either
-# 'removed' or are 'still unavailable', and count as lasting until `log_end`.
+# Pairs a node's "is offline" with its next "is online", in order of when they
+# began. Outages without an end last until the node was 'removed', or are
+# 'still offline' and last until `log_end`.
 def outages [events: table, log_end: datetime]: nothing -> table {
-  mut timeouts = {}  # node -> {time, last_heard} of its latest subscription timeout
-  mut open = {}      # node -> {last_heard, unavailable}
+  # node -> when its last report arrived, if its subscription timed out since
+  # it last subscribed or came online.
+  mut lost = {}
+  mut open = {}  # node -> {last_heard, offline}
   mut found = []
   for e in $events {
     if $e.timed_out != null {
-      $timeouts = $timeouts | upsert $e.timed_out {time: $e.time, last_heard: ($e.time - (parse-duration $e.after))}
-    } else if $e.unavailable != null {
-      let node = $e.unavailable
-      # The timeout that started the 3-minute grace period, not an older one.
-      let timeout = $timeouts | get -o $node
-      let last_heard = if $timeout != null and $e.time - $timeout.time <= 5min { $timeout.last_heard }
+      let node = $e.timed_out
+      let last_heard = $e.time - (parse-duration $e.after)
+      $lost = $lost | upsert $node $last_heard
+      # A timeout logged after the device went offline still says when it was
+      # last heard.
+      if $node in ($open | columns) and ($open | get $node).last_heard == null {
+        $open = $open | upsert $node ($open | get $node | upsert last_heard $last_heard)
+      }
+    } else if $e.subscribed != null {
+      $lost = $lost | upsert $e.subscribed null
+    } else if $e.offline != null {
+      let node = $e.offline
       if $node not-in ($open | columns) {
-        $open = $open | insert $node {last_heard: $last_heard, unavailable: $e.time}
+        $open = $open | insert $node {last_heard: ($lost | get -o $node), offline: $e.time}
       }
     } else {
-      let node = $e.available | default $e.removed
+      let node = $e.online | default $e.removed
+      $lost = $lost | upsert $node null
       if $node in ($open | columns) {
-        let unended = if $e.available == null { 'removed' }
+        let unended = if $e.online == null { 'removed' }
         $found = $found | append (outage $node ($open | get $node) $e.time $unended)
         $open = $open | reject $node
       }
     }
   }
-  let unended = $open | items {|node, o| outage $node $o $log_end 'still unavailable' }
-  $found ++ $unended | sort-by unavailable
+  let unended = $open | items {|node, o| outage $node $o $log_end 'still offline' }
+  $found ++ $unended | sort-by offline
 }
 
-# An outage record. It lasted until `until`, and either ended then
-# (`available`) or didn't, for the reason in `unended`.
+# An outage record. It lasted until `until`, and either ended then (`online`)
+# or didn't, for the reason in `unended`.
 def outage [
   node: string
   o: record
@@ -176,8 +190,8 @@ def outage [
   {
     node: ($node | into int --radix 16)
     last_heard: $o.last_heard
-    unavailable: $o.unavailable
-    available: (if $unended == null { $until })
+    offline: $o.offline
+    online: (if $unended == null { $until })
     unended: $unended
     until: $until
   }
@@ -196,17 +210,17 @@ def parse-duration [text: string]: nothing -> duration {
 
 # Nodes with an outage between `from` and `to`, in order.
 def nodes-down [outages: table, from: datetime, to: datetime]: nothing -> list<int> {
-  $outages | where {|o| $o.unavailable < $to and $o.until > $from } | each { $in.node } | uniq | sort
+  $outages | where {|o| $o.offline < $to and $o.until > $from } | each { $in.node } | uniq | sort
 }
 
 # How many of a node's outages began between `from` and `to`, and how long it
-# was unavailable then, including outages that began earlier.
+# was offline then, including outages that began earlier.
 def node-downtime [outages: table, node: int, from: datetime, to: datetime]: nothing -> record {
   let mine = $outages | where node == $node
   {
-    outages: ($mine | where unavailable >= $from and unavailable < $to | length)
+    outages: ($mine | where offline >= $from and offline < $to | length)
     down: ($mine | reduce --fold 0sec {|o, total|
-      let start = if $o.unavailable > $from { $o.unavailable } else { $from }
+      let start = if $o.offline > $from { $o.offline } else { $from }
       let end = if $o.until < $to { $o.until } else { $to }
       if $end > $start { $total + ($end - $start) } else { $total }
     } | round-minutes)
@@ -218,12 +232,12 @@ def node-name [log: record, node: int]: nothing -> oneof<string, nothing> {
   $log.names | where node == $node | get -o 0.name
 }
 
-# Whether a node is still unavailable when the log ends, or was removed.
+# Whether a node is still offline when the log ends, or was removed.
 def node-note [log: record, node: int]: nothing -> oneof<string, nothing> {
-  let unended = $log.outages | where node == $node and unended == 'still unavailable'
+  let unended = $log.outages | where node == $node and unended == 'still offline'
   let removed = $log.removed | where node == $node
   if ($unended | is-not-empty) {
-    $"unavailable since (($unended | first).unavailable | format date $TIME_FORMAT)"
+    $"offline since (($unended | first).offline | format date $TIME_FORMAT)"
   } else if ($removed | is-not-empty) {
     $"removed (($removed | first).time | format date $TIME_FORMAT)"
   }
